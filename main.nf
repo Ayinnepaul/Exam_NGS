@@ -1,87 +1,114 @@
-// a process that downloads a FASTA file given an accession number
+// parameters
+
+params.accession = "M21012"          // default if no NCBI accession number is provided
+params.in = null               // Folder with sample FASTA files
+params.outdir  = "./results"        // Results folder
 
 process download_refseq {
     conda "bioconda::entrez-direct=24.0"
+
+    tag "$accession"
 
     input:
         val accession
 
     output:
-        path "reference.fasta" 
+        path "reference.fasta"
+
+    publishDir params.outdir,  mode: 'copy'
 
     script:
-
-    """
-    esearch -db nucleotide -query "$accession" \
-    | efetch -format fasta > "reference.fasta" 
-
     """
 
+    esearch -db nucleotide -query "${accession}" | efetch -format fasta > reference.fasta
+
+    """
 }
 
+process combine_fastas {
 
-process compile_seq {
+    tag "combine_fastas"
 
-   
     input:
-        path  samples
+    path fastas
 
     output:
-        path "combined_seq.fasta"
+    path "combined.fasta"
+
+    publishDir params.outdir, mode: 'copy'
 
     script:
-
     """
-    cat ${samples} > combined_seq.fasta
-
+    echo "Combining sample FASTA files"
+    cat ${fastas.join(' ')} > combined.fasta
     """
-
-
 }
 
-process align_seq {
-
+process mafft_align {
     conda "bioconda::mafft=7.525"
 
+    tag "mafft_alignment"
+
     input:
-        path combined_fasta
-        
+    path ref
+    path combined
 
     output:
-        path "sequences_aligned.fasta", emit: aligned
+    path "aligned.fasta"
 
+    publishDir params.outdir, mode: 'copy'
     script:
-
     """
-    mafft --auto $combined_fasta > sequences_aligned.fasta
-
+    echo "Running MAFFT alignment"
+    cat ${ref} ${combined} > alignment_input.fasta
+    mafft --auto alignment_input.fasta > aligned.fasta
     """
 }
 
+process trimal_clean {
+    conda "bioconda::trimal=1.5.0"
 
+    tag "trimal_clean"
 
+    input:
+    path aligned
 
-// parameters defined here
-params.accession = "M21012"
-params.sample_seq = null
+    output:
+    path "aligned_trimmed.fasta"
+    path "trimal_report.html"
+
+    publishDir params.outdir, mode: 'copy'
+    script:
+    """
+    echo "Cleaning alignment with TrimAl"
+    trimal \\
+        -in ${aligned} \\
+        -out aligned_trimmed.fasta \\
+        -htmlout trimal_report.html \\
+        -automated1
+    """
+}
 
 
 
 workflow {
-
- if (params.sample_seq == null) {
-        println("no sample sequences provided")
-        exit 1
+    if ( !params.in ) {
+        error "ERROR: You must provide a directory with FASTA files using --in"
     }
 
-ch_input = channel.fromPath("${params.sample_seq}/*.fasta").collect()
+    Channel
+        .fromPath("${params.in}/*.fasta")
+        .ifEmpty { error "ERROR: No FASTA files found in ${params.in}" }
+        .set { sample_fastas }
 
+    ref_ch = download_refseq(params.accession)
 
-download_refseq(params.accession)
+    // Step 2: Combine sample FASTAs
+    combined_ch = combine_fastas(sample_fastas)
 
-compile_seq(ch_input)
+    // Step 3: Align reference + samples
+    aligned_ch = mafft_align(ref_ch, combined_ch)
 
-align_seq()
-
-
+    // Step 4: Clean alignment with TrimAl
+    trimal_clean(aligned_ch)
 }
